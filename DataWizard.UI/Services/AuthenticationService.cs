@@ -26,7 +26,7 @@ namespace DataWizard.UI.Services
         {
             try
             {
-                var request = new HttpRequestMessage(HttpMethod.Get, $"{_supabaseUrl}/rest/v1/users?username=eq.{username}&password=eq.{password}");
+                var request = new HttpRequestMessage(HttpMethod.Get, $"{_supabaseUrl}/rest/v1/users?username=eq.{username}&select=*");
                 request.Headers.Add("Prefer", "return=representation");
 
                 var response = await _client.SendAsync(request);
@@ -37,7 +37,20 @@ namespace DataWizard.UI.Services
                     var users = JsonSerializer.Deserialize<dynamic[]>(content);
                     if (users != null && users.Length > 0)
                     {
-                        return (true, null);
+                        var user = users[0];
+                        if (user.GetProperty("password").GetString() == password)
+                        {
+                            // Update last login
+                            var updateRequest = new HttpRequestMessage(HttpMethod.Patch, $"{_supabaseUrl}/rest/v1/users?id=eq.{user.GetProperty("id").GetString()}");
+                            updateRequest.Content = new StringContent(
+                                JsonSerializer.Serialize(new { last_login_at = DateTime.UtcNow }),
+                                Encoding.UTF8,
+                                "application/json"
+                            );
+                            await _client.SendAsync(updateRequest);
+                            
+                            return (true, null);
+                        }
                     }
                 }
 
@@ -68,6 +81,7 @@ namespace DataWizard.UI.Services
                     Encoding.UTF8,
                     "application/json"
                 );
+                request.Headers.Add("Prefer", "return=representation");
 
                 var response = await _client.SendAsync(request);
                 if (response.IsSuccessStatusCode)
