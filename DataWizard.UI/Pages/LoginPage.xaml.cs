@@ -97,7 +97,6 @@ namespace DataWizard.UI.Pages
                 string email = string.Empty;
                 string confirmPassword = string.Empty;
 
-                // Find the email TextBox in the additional fields
                 var emailGrid = AdditionalFieldsPanel.Children[0] as Grid;
                 if (emailGrid != null)
                 {
@@ -115,7 +114,6 @@ namespace DataWizard.UI.Pages
                     }
                 }
 
-                // Find the confirm password box in the additional fields
                 var confirmPasswordGrid = AdditionalFieldsPanel.Children[1] as Grid;
                 if (confirmPasswordGrid != null)
                 {
