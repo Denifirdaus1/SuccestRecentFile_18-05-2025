@@ -36,8 +36,6 @@ namespace DataWizard.UI.Pages
             await dialog.ShowAsync();
         }
 
-        #region Event Handlers
-
         private void SignInButton_Click(object sender, RoutedEventArgs e)
         {
             SwitchToSignIn();
@@ -95,7 +93,6 @@ namespace DataWizard.UI.Pages
             else
             {
                 string email = string.Empty;
-                string confirmPassword = string.Empty;
 
                 var emailGrid = AdditionalFieldsPanel.Children[0] as Grid;
                 if (emailGrid != null)
@@ -114,32 +111,9 @@ namespace DataWizard.UI.Pages
                     }
                 }
 
-                var confirmPasswordGrid = AdditionalFieldsPanel.Children[1] as Grid;
-                if (confirmPasswordGrid != null)
-                {
-                    var confirmPasswordStackPanel = confirmPasswordGrid.Children[1] as StackPanel;
-                    if (confirmPasswordStackPanel != null)
-                    {
-                        foreach (var child in confirmPasswordStackPanel.Children)
-                        {
-                            if (child is PasswordBox passwordBox)
-                            {
-                                confirmPassword = passwordBox.Password;
-                                break;
-                            }
-                        }
-                    }
-                }
-
                 if (string.IsNullOrWhiteSpace(email))
                 {
                     await ShowDialogAsync("Validation Error", "Please enter your email address.");
-                    return;
-                }
-
-                if (password != confirmPassword)
-                {
-                    await ShowDialogAsync("Validation Error", "Passwords do not match.");
                     return;
                 }
 
@@ -155,10 +129,6 @@ namespace DataWizard.UI.Pages
                 }
             }
         }
-
-        #endregion
-
-        #region UI State Management
 
         private void SwitchToSignIn()
         {
@@ -192,14 +162,7 @@ namespace DataWizard.UI.Pages
                 "/Assets/email.png",
                 true);
 
-            Grid confirmPasswordField = CreateInputField(
-                "Confirm Password",
-                "Confirm password",
-                "/Assets/lock.png",
-                false);
-
             AdditionalFieldsPanel.Children.Add(emailField);
-            AdditionalFieldsPanel.Children.Add(confirmPasswordField);
 
             _currentMode = "signup";
             UpdateButtonStates();
@@ -238,10 +201,6 @@ namespace DataWizard.UI.Pages
             storyboard.Children.Add(fadeAnimation);
             storyboard.Begin();
         }
-
-        #endregion
-
-        #region Helper Methods
 
         private Grid CreateInputField(string label, string placeholder, string iconPath, bool isTextField)
         {
@@ -360,7 +319,5 @@ namespace DataWizard.UI.Pages
                 }
             }
         }
-
-        #endregion
     }
 }

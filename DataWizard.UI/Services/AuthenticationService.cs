@@ -26,16 +26,19 @@ namespace DataWizard.UI.Services
         {
             try
             {
-                var request = new HttpRequestMessage(HttpMethod.Post, $"{_supabaseUrl}/auth/v1/token?grant_type=password");
-                var credentials = new { email = username, password = password };
-                request.Content = new StringContent(JsonSerializer.Serialize(credentials), Encoding.UTF8, "application/json");
+                var request = new HttpRequestMessage(HttpMethod.Get, $"{_supabaseUrl}/rest/v1/users?username=eq.{username}&password=eq.{password}");
+                request.Headers.Add("Prefer", "return=representation");
 
                 var response = await _client.SendAsync(request);
+                var content = await response.Content.ReadAsStringAsync();
+                
                 if (response.IsSuccessStatusCode)
                 {
-                    var content = await response.Content.ReadAsStringAsync();
-                    var result = JsonSerializer.Deserialize<dynamic>(content);
-                    return (true, null);
+                    var users = JsonSerializer.Deserialize<dynamic[]>(content);
+                    if (users != null && users.Length > 0)
+                    {
+                        return (true, null);
+                    }
                 }
 
                 return (false, "Invalid username or password");
@@ -46,23 +49,25 @@ namespace DataWizard.UI.Services
             }
         }
 
-        public async Task<(bool success, string error)> SignUpAsync(string username, string password, string email, string fullName = null)
+        public async Task<(bool success, string error)> SignUpAsync(string username, string password, string email)
         {
             try
             {
-                var request = new HttpRequestMessage(HttpMethod.Post, $"{_supabaseUrl}/auth/v1/signup");
+                var request = new HttpRequestMessage(HttpMethod.Post, $"{_supabaseUrl}/rest/v1/users");
                 var userData = new
                 {
-                    email = email,
+                    username = username,
                     password = password,
-                    data = new
-                    {
-                        username = username,
-                        full_name = fullName
-                    }
+                    email = email,
+                    created_at = DateTime.UtcNow,
+                    is_active = true
                 };
 
-                request.Content = new StringContent(JsonSerializer.Serialize(userData), Encoding.UTF8, "application/json");
+                request.Content = new StringContent(
+                    JsonSerializer.Serialize(userData),
+                    Encoding.UTF8,
+                    "application/json"
+                );
 
                 var response = await _client.SendAsync(request);
                 if (response.IsSuccessStatusCode)
@@ -71,6 +76,11 @@ namespace DataWizard.UI.Services
                 }
 
                 var errorContent = await response.Content.ReadAsStringAsync();
+                if (errorContent.Contains("duplicate"))
+                {
+                    return (false, "Username or email already exists");
+                }
+
                 return (false, $"Registration failed: {errorContent}");
             }
             catch (Exception ex)
