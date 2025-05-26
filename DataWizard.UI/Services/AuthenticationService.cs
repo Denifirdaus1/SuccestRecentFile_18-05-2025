@@ -26,29 +26,27 @@ namespace DataWizard.UI.Services
         {
             try
             {
-                var request = new HttpRequestMessage(HttpMethod.Get, $"{_supabaseUrl}/rest/v1/users?username=eq.{username}&select=*");
+                var request = new HttpRequestMessage(HttpMethod.Get, $"{_supabaseUrl}/rest/v1/users?username=eq.{Uri.EscapeDataString(username)}&select=*");
                 request.Headers.Add("Prefer", "return=representation");
 
                 var response = await _client.SendAsync(request);
                 var content = await response.Content.ReadAsStringAsync();
-                
+
                 if (response.IsSuccessStatusCode)
                 {
-                    var users = JsonSerializer.Deserialize<dynamic[]>(content);
+                    var users = JsonSerializer.Deserialize<JsonElement[]>(content);
                     if (users != null && users.Length > 0)
                     {
                         var user = users[0];
                         if (user.GetProperty("password").GetString() == password)
                         {
-                            // Update last login
-                            var updateRequest = new HttpRequestMessage(HttpMethod.Patch, $"{_supabaseUrl}/rest/v1/users?id=eq.{user.GetProperty("id").GetString()}");
-                            updateRequest.Content = new StringContent(
-                                JsonSerializer.Serialize(new { last_login_at = DateTime.UtcNow }),
-                                Encoding.UTF8,
-                                "application/json"
-                            );
-                            await _client.SendAsync(updateRequest);
+                            var updateRequest = new HttpRequestMessage(HttpMethod.Patch, 
+                                $"{_supabaseUrl}/rest/v1/users?id=eq.{user.GetProperty("id").GetString()}");
                             
+                            var updateData = JsonSerializer.Serialize(new { last_login_at = DateTime.UtcNow });
+                            updateRequest.Content = new StringContent(updateData, Encoding.UTF8, "application/json");
+                            
+                            await _client.SendAsync(updateRequest);
                             return (true, null);
                         }
                     }
@@ -67,6 +65,7 @@ namespace DataWizard.UI.Services
             try
             {
                 var request = new HttpRequestMessage(HttpMethod.Post, $"{_supabaseUrl}/rest/v1/users");
+                
                 var userData = new
                 {
                     username = username,
@@ -76,11 +75,8 @@ namespace DataWizard.UI.Services
                     is_active = true
                 };
 
-                request.Content = new StringContent(
-                    JsonSerializer.Serialize(userData),
-                    Encoding.UTF8,
-                    "application/json"
-                );
+                var json = JsonSerializer.Serialize(userData);
+                request.Content = new StringContent(json, Encoding.UTF8, "application/json");
                 request.Headers.Add("Prefer", "return=representation");
 
                 var response = await _client.SendAsync(request);
