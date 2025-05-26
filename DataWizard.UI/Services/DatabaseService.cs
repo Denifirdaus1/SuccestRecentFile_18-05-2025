@@ -1,5 +1,7 @@
 using System;
-using System.Data.SqlClient;
+using System.Net.Http;
+using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -8,36 +10,68 @@ namespace DataWizard.UI.Services
 {
     public class DatabaseService
     {
-        private readonly string _connectionString;
+        private readonly HttpClient _client;
+        private readonly string _supabaseUrl;
+        private readonly string _anonKey;
 
         public DatabaseService()
         {
-            _connectionString = "Server=DESKTOP-01G7KT1\\SQLEXPRESS;Database=Quicklisticks;Trusted_Connection=True;";
+            _supabaseUrl = "https://rrlmejrtlqnfaavyrrtf.supabase.co";
+            _anonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJybG1lanJ0bHFuZmFhdnlycnRmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDgyMzI5NzUsImV4cCI6MjA2MzgwODk3NX0.8uC7og_bfk2C-Ok6KNGAY5Ej-nz_wBz07-94BG1rUZY";
+            
+            _client = new HttpClient();
+            _client.DefaultRequestHeaders.Add("apikey", _anonKey);
+            _client.DefaultRequestHeaders.Add("Authorization", $"Bearer {_anonKey}");
+        }
+
+        private async Task<T> SendRequestAsync<T>(string endpoint, HttpMethod method, object data = null)
+        {
+            try
+            {
+                var request = new HttpRequestMessage(method, $"{_supabaseUrl}/rest/v1/{endpoint}");
+                
+                if (data != null)
+                {
+                    var json = JsonSerializer.Serialize(data);
+                    request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+                }
+
+                request.Headers.Add("Prefer", "return=representation");
+
+                var response = await _client.SendAsync(request);
+                response.EnsureSuccessStatusCode();
+
+                var content = await response.Content.ReadAsStringAsync();
+                return JsonSerializer.Deserialize<T>(content, new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"API Error: {ex.Message}");
+                throw;
+            }
         }
 
         public async Task<(bool success, string error)> ValidateUserCredentialsAsync(string username, string password)
         {
             try
             {
-                using (var connection = new SqlConnection(_connectionString))
+                var users = await SendRequestAsync<List<dynamic>>(
+                    $"users?username=eq.{username}&password=eq.{password}&select=id,username,email,full_name",
+                    HttpMethod.Get);
+
+                if (users != null && users.Count > 0)
                 {
-                    await connection.OpenAsync();
+                    await SendRequestAsync<dynamic>(
+                        $"users?id=eq.{users[0].id}",
+                        HttpMethod.Patch,
+                        new { last_login_at = DateTime.UtcNow });
 
-                    using (var command = new SqlCommand("sp_UserLogin", connection))
-                    {
-                        command.CommandType = System.Data.CommandType.StoredProcedure;
-                        command.Parameters.AddWithValue("@Username", username);
-                        command.Parameters.AddWithValue("@Password", password);
-
-                        using (var reader = await command.ExecuteReaderAsync())
-                        {
-                            if (await reader.ReadAsync())
-                            {
-                                return (true, null);
-                            }
-                        }
-                    }
+                    return (true, null);
                 }
+
                 return (false, "Invalid username or password");
             }
             catch (Exception ex)
@@ -50,181 +84,94 @@ namespace DataWizard.UI.Services
         {
             try
             {
-                using (var connection = new SqlConnection(_connectionString))
+                var newUser = new
                 {
-                    await connection.OpenAsync();
+                    username = username,
+                    password = password,
+                    email = email,
+                    full_name = fullName ?? string.Empty,
+                    created_at = DateTime.UtcNow
+                };
 
-                    using (var checkCommand = new SqlCommand(
-                        "SELECT COUNT(*) FROM [User] WHERE Username = @Username OR Email = @Email",
-                        connection))
-                    {
-                        checkCommand.Parameters.AddWithValue("@Username", username);
-                        checkCommand.Parameters.AddWithValue("@Email", email);
-
-                        int exists = (int)await checkCommand.ExecuteScalarAsync();
-                        if (exists > 0)
-                        {
-                            return (false, "Username or email already exists");
-                        }
-                    }
-
-                    using (var command = new SqlCommand(
-                        "INSERT INTO [User] (Username, Password, Email, FullName, CreatedDate) " +
-                        "VALUES (@Username, @Password, @Email, @FullName, GETDATE())",
-                        connection))
-                    {
-                        command.Parameters.AddWithValue("@Username", username);
-                        command.Parameters.AddWithValue("@Password", password);
-                        command.Parameters.AddWithValue("@Email", email);
-                        command.Parameters.AddWithValue("@FullName", fullName ?? string.Empty);
-
-                        await command.ExecuteNonQueryAsync();
-                        return (true, null);
-                    }
-                }
+                await SendRequestAsync<dynamic>("users", HttpMethod.Post, newUser);
+                return (true, null);
             }
             catch (Exception ex)
             {
+                if (ex.Message.Contains("duplicate"))
+                {
+                    return (false, "Username or email already exists");
+                }
                 return (false, $"Database error: {ex.Message}");
             }
         }
 
         public async Task<List<OutputFile>> GetRecentFilesAsync(int userId, int count = 4)
         {
-            var files = new List<OutputFile>();
             try
             {
-                using (var connection = new SqlConnection(_connectionString))
-                {
-                    await connection.OpenAsync();
-                    using (var command = new SqlCommand(
-                        @"SELECT TOP (@Count) FileID, FileName, FilePath, FileSize, CreatedDate 
-                          FROM OutputFile of
-                          INNER JOIN History h ON of.HistoryID = h.HistoryID
-                          WHERE h.UserID = @UserID
-                          ORDER BY of.CreatedDate DESC", connection))
-                    {
-                        command.Parameters.AddWithValue("@Count", count);
-                        command.Parameters.AddWithValue("@UserID", userId);
-
-                        using (var reader = await command.ExecuteReaderAsync())
-                        {
-                            while (await reader.ReadAsync())
-                            {
-                                files.Add(new OutputFile
-                                {
-                                    FileId = reader.GetInt32(0),
-                                    FileName = reader.GetString(1),
-                                    FilePath = reader.GetString(2),
-                                    FileSize = reader.GetInt64(3),
-                                    CreatedDate = reader.GetDateTime(4)
-                                });
-                            }
-                        }
-                    }
-                }
+                var files = await SendRequestAsync<List<OutputFile>>(
+                    $"output_files?user_id=eq.{userId}&order=created_at.desc&limit={count}",
+                    HttpMethod.Get);
+                return files ?? new List<OutputFile>();
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error fetching recent files: {ex.Message}");
+                Debug.WriteLine($"Error fetching recent files: {ex.Message}");
+                return new List<OutputFile>();
             }
-            return files;
         }
 
         public async Task<List<Folder>> GetUserFoldersAsync(int userId, int count = 4)
         {
-            var folders = new List<Folder>();
             try
             {
-                using (var connection = new SqlConnection(_connectionString))
-                {
-                    await connection.OpenAsync();
-                    using (var command = new SqlCommand(
-                        @"SELECT TOP (@Count) FolderID, FolderName, CreatedDate 
-                          FROM Folder 
-                          WHERE UserID = @UserID
-                          ORDER BY LastModifiedDate DESC", connection))
-                    {
-                        command.Parameters.AddWithValue("@Count", count);
-                        command.Parameters.AddWithValue("@UserID", userId);
-
-                        using (var reader = await command.ExecuteReaderAsync())
-                        {
-                            while (await reader.ReadAsync())
-                            {
-                                folders.Add(new Folder
-                                {
-                                    FolderId = reader.GetInt32(0),
-                                    FolderName = reader.GetString(1),
-                                    CreatedDate = reader.GetDateTime(2)
-                                });
-                            }
-                        }
-                    }
-                }
+                var folders = await SendRequestAsync<List<Folder>>(
+                    $"folders?user_id=eq.{userId}&order=updated_at.desc&limit={count}",
+                    HttpMethod.Get);
+                return folders ?? new List<Folder>();
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error fetching folders: {ex.Message}");
+                Debug.WriteLine($"Error fetching folders: {ex.Message}");
+                return new List<Folder>();
             }
-            return folders;
         }
 
         public async Task<List<ChartData>> GetFileTypeStatsAsync(int userId)
         {
-            var stats = new List<ChartData>();
             try
             {
-                using (var connection = new SqlConnection(_connectionString))
-                {
-                    await connection.OpenAsync();
-                    using (var command = new SqlCommand("sp_GetInputFileTypeStats", connection))
-                    {
-                        command.CommandType = System.Data.CommandType.StoredProcedure;
-                        command.Parameters.AddWithValue("@UserID", userId);
-
-                        using (var reader = await command.ExecuteReaderAsync())
-                        {
-                            while (await reader.ReadAsync())
-                            {
-                                stats.Add(new ChartData
-                                {
-                                    Label = reader.GetString(0),
-                                    Value = reader.GetInt32(1)
-                                });
-                            }
-                        }
-                    }
-                }
+                var stats = await SendRequestAsync<List<ChartData>>(
+                    $"rpc/get_input_file_type_stats?p_user_id={userId}",
+                    HttpMethod.Post);
+                return stats ?? new List<ChartData>();
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error fetching file type stats: {ex.Message}");
+                Debug.WriteLine($"Error fetching file type stats: {ex.Message}");
+                return new List<ChartData>();
             }
-            return stats;
         }
 
         public async Task<string> GetUserPreferredFormatAsync(int userId)
         {
             try
             {
-                using (var connection = new SqlConnection(_connectionString))
+                var preferences = await SendRequestAsync<List<dynamic>>(
+                    $"user_preferences?user_id=eq.{userId}&select=format",
+                    HttpMethod.Get);
+                
+                if (preferences != null && preferences.Count > 0)
                 {
-                    await connection.OpenAsync();
-                    using (var command = new SqlCommand(
-                        "SELECT Format FROM OutputFormatPreference WHERE UserID = @UserID",
-                        connection))
-                    {
-                        command.Parameters.AddWithValue("@UserID", userId);
-                        var result = await command.ExecuteScalarAsync();
-                        return result?.ToString() ?? "Excel"; // Default to Excel if no preference set
-                    }
+                    return preferences[0].format;
                 }
+                return "Excel";
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error getting user format preference: {ex.Message}");
-                return "Excel"; // Default to Excel on error
+                Debug.WriteLine($"Error getting user format preference: {ex.Message}");
+                return "Excel";
             }
         }
 
@@ -232,197 +179,35 @@ namespace DataWizard.UI.Services
         {
             try
             {
-                using (var connection = new SqlConnection(_connectionString))
-                {
-                    await connection.OpenAsync();
-                    using (var command = new SqlCommand(
-                        @"MERGE OutputFormatPreference WITH (HOLDLOCK) AS target
-                          USING (SELECT @UserID AS UserID, @Format AS Format) AS source
-                          ON target.UserID = source.UserID
-                          WHEN MATCHED THEN
-                              UPDATE SET Format = source.Format, UpdatedAt = GETDATE()
-                          WHEN NOT MATCHED THEN
-                              INSERT (UserID, Format)
-                              VALUES (source.UserID, source.Format);",
-                        connection))
-                    {
-                        command.Parameters.AddWithValue("@UserID", userId);
-                        command.Parameters.AddWithValue("@Format", format);
-                        await command.ExecuteNonQueryAsync();
-                    }
-                }
+                var preference = new { user_id = userId, format = format };
+                await SendRequestAsync<dynamic>("user_preferences", HttpMethod.Post, preference);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error saving user format preference: {ex.Message}");
+                Debug.WriteLine($"Error saving user format preference: {ex.Message}");
             }
         }
 
-        public async Task LogFileUsageAsync(int userId, string fileName, string fileType, string processingMode)
-        {
-            try
-            {
-                using (var connection = new SqlConnection(_connectionString))
-                {
-                    await connection.OpenAsync();
-                    using (var command = new SqlCommand(
-                        @"INSERT INTO FileUsageHistory (UserID, FileName, FileType, ProcessingMode)
-                          VALUES (@UserID, @FileName, @FileType, @ProcessingMode)",
-                        connection))
-                    {
-                        command.Parameters.AddWithValue("@UserID", userId);
-                        command.Parameters.AddWithValue("@FileName", fileName);
-                        command.Parameters.AddWithValue("@FileType", fileType);
-                        command.Parameters.AddWithValue("@ProcessingMode", processingMode);
-                        await command.ExecuteNonQueryAsync();
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error logging file usage: {ex.Message}");
-            }
-        }
-
-        public async Task<bool> SaveFileToFolderAsync(int userId, int folderId, string fileName, string filePath)
-        {
-            try
-            {
-                using (var connection = new SqlConnection(_connectionString))
-                {
-                    await connection.OpenAsync();
-                    using (var command = new SqlCommand(
-                        @"INSERT INTO SavedFiles (UserID, FolderID, FileName, FilePath)
-                          VALUES (@UserID, @FolderID, @FileName, @FilePath)",
-                        connection))
-                    {
-                        command.Parameters.AddWithValue("@UserID", userId);
-                        command.Parameters.AddWithValue("@FolderID", folderId);
-                        command.Parameters.AddWithValue("@FileName", fileName);
-                        command.Parameters.AddWithValue("@FilePath", filePath);
-                        await command.ExecuteNonQueryAsync();
-                        return true;
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error saving file to folder: {ex.Message}");
-                return false;
-            }
-        }
-
-        public async Task<List<SavedFile>> GetSavedFilesInFolderAsync(int userId, int folderId)
-        {
-            var files = new List<SavedFile>();
-            try
-            {
-                using (var connection = new SqlConnection(_connectionString))
-                {
-                    await connection.OpenAsync();
-                    using (var command = new SqlCommand(
-                        @"SELECT Id, FileName, FilePath, CreatedAt
-                          FROM SavedFiles
-                          WHERE UserID = @UserID AND FolderID = @FolderID
-                          ORDER BY CreatedAt DESC",
-                        connection))
-                    {
-                        command.Parameters.AddWithValue("@UserID", userId);
-                        command.Parameters.AddWithValue("@FolderID", folderId);
-
-                        using (var reader = await command.ExecuteReaderAsync())
-                        {
-                            while (await reader.ReadAsync())
-                            {
-                                files.Add(new SavedFile
-                                {
-                                    Id = reader.GetGuid(0),
-                                    FileName = reader.GetString(1),
-                                    FilePath = reader.GetString(2),
-                                    CreatedDate = reader.GetDateTime(3)
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error getting saved files: {ex.Message}");
-            }
-            return files;
-        }
         public async Task<int> LogHistoryAsync(int userId, int inputFileTypeId, int outputFormatId, string prompt, string processType)
         {
-            // Log method entry with parameters
-            Debug.WriteLine($"[LogHistoryAsync] Starting history logging for UserID: {userId}, " +
-                           $"InputFileTypeID: {inputFileTypeId}, OutputFormatID: {outputFormatId}, " +
-                           $"ProcessType: {processType}");
-
             try
             {
-                using (var connection = new SqlConnection(_connectionString))
+                var history = new
                 {
-                    // Log connection opening
-                    Debug.WriteLine($"[LogHistoryAsync] Opening database connection...");
-                    await connection.OpenAsync();
-                    Debug.WriteLine($"[LogHistoryAsync] Database connection opened successfully");
+                    user_id = userId,
+                    input_file_type_id = inputFileTypeId,
+                    output_format_id = outputFormatId,
+                    prompt_text = prompt,
+                    process_type = processType
+                };
 
-                    using (var command = new SqlCommand(
-                        @"INSERT INTO History (UserID, InputFileType, OutputFormatID, ProcessDate, ProcessingTime, PromptText, ProcessType)
-                  VALUES (@UserID, @InputFileType, @OutputFormatID, GETDATE(), 0, @PromptText, @ProcessType);
-                  SELECT CAST(SCOPE_IDENTITY() AS INT);",
-                        connection))
-                    {
-                        // Log parameter values
-                        Debug.WriteLine($"[LogHistoryAsync] Setting parameters: " +
-                                       $"UserID={userId}, " +
-                                       $"InputFileType={inputFileTypeId}, " +
-                                       $"OutputFormatID={outputFormatId}, " +
-                                       $"PromptText={(prompt != null ? "[REDACTED]" : "null")}, " +
-                                       $"ProcessType={processType}");
-
-                        command.Parameters.AddWithValue("@UserID", userId);
-                        command.Parameters.AddWithValue("@InputFileType", inputFileTypeId);
-                        command.Parameters.AddWithValue("@OutputFormatID", outputFormatId);
-                        command.Parameters.AddWithValue("@PromptText", prompt ?? string.Empty);
-                        command.Parameters.AddWithValue("@ProcessType", processType ?? string.Empty);
-
-                        // Log before executing command
-                        Debug.WriteLine($"[LogHistoryAsync] Executing SQL command...");
-
-                        var result = await command.ExecuteScalarAsync();
-                        int historyId = (result != null) ? (int)result : -1;
-
-                        // Log successful insertion
-                        Debug.WriteLine($"[LogHistoryAsync] Successfully logged history. HistoryID: {historyId}");
-
-                        return historyId;
-                    }
-                }
-            }
-            catch (SqlException sqlEx)
-            {
-                // Special handling for SQL-specific errors
-                Debug.WriteLine($"[LogHistoryAsync] SQL Error {sqlEx.Number}: {sqlEx.Message}");
-                Debug.WriteLine($"[LogHistoryAsync] SQL Server Errors:");
-                foreach (SqlError err in sqlEx.Errors)
-                {
-                    Debug.WriteLine($"[LogHistoryAsync] - Error {err.Number}: {err.Message}");
-                    Debug.WriteLine($"[LogHistoryAsync] - Procedure: {err.Procedure}, Line: {err.LineNumber}");
-                }
-                return -1;
+                var result = await SendRequestAsync<dynamic>("history", HttpMethod.Post, history);
+                return result?.id ?? -1;
             }
             catch (Exception ex)
             {
-                // General error handling
-                Debug.WriteLine($"[LogHistoryAsync] General Error: {ex.Message}");
-                Debug.WriteLine($"[LogHistoryAsync] Stack Trace: {ex.StackTrace}");
+                Debug.WriteLine($"Error logging history: {ex.Message}");
                 return -1;
-            }
-            finally
-            {
-                Debug.WriteLine($"[LogHistoryAsync] Logging operation completed");
             }
         }
 
@@ -430,18 +215,10 @@ namespace DataWizard.UI.Services
         {
             try
             {
-                using (var connection = new SqlConnection(_connectionString))
-                {
-                    await connection.OpenAsync();
-                    using (var command = new SqlCommand(
-                        "UPDATE History SET ProcessingTime = @ProcessingTime WHERE HistoryID = @HistoryId",
-                        connection))
-                    {
-                        command.Parameters.AddWithValue("@HistoryId", historyId);
-                        command.Parameters.AddWithValue("@ProcessingTime", processingTimeMs);
-                        await command.ExecuteNonQueryAsync();
-                    }
-                }
+                await SendRequestAsync<dynamic>(
+                    $"history?id=eq.{historyId}",
+                    HttpMethod.Patch,
+                    new { processing_time = processingTimeMs });
             }
             catch (Exception ex)
             {
@@ -453,22 +230,10 @@ namespace DataWizard.UI.Services
         {
             try
             {
-                using (var connection = new SqlConnection(_connectionString))
-                {
-                    await connection.OpenAsync();
-                    using (var command = new SqlCommand(
-                        @"UPDATE History 
-                          SET ProcessingTime = @ProcessingTime, 
-                              IsSuccess = @IsSuccess
-                          WHERE HistoryID = @HistoryId",
-                        connection))
-                    {
-                        command.Parameters.AddWithValue("@HistoryId", historyId);
-                        command.Parameters.AddWithValue("@ProcessingTime", processingTimeMs);
-                        command.Parameters.AddWithValue("@IsSuccess", isSuccess);
-                        await command.ExecuteNonQueryAsync();
-                    }
-                }
+                await SendRequestAsync<dynamic>(
+                    $"history?id=eq.{historyId}",
+                    HttpMethod.Patch,
+                    new { is_success = isSuccess, processing_time = processingTimeMs });
             }
             catch (Exception ex)
             {
@@ -480,21 +245,15 @@ namespace DataWizard.UI.Services
         {
             try
             {
-                using (var connection = new SqlConnection(_connectionString))
+                var outputFile = new
                 {
-                    await connection.OpenAsync();
-                    using (var command = new SqlCommand(
-                        @"INSERT INTO OutputFile (HistoryID, FileName, FilePath, FileSize, CreatedDate)
-                          VALUES (@HistoryId, @FileName, @FilePath, @FileSize, GETDATE())",
-                        connection))
-                    {
-                        command.Parameters.AddWithValue("@HistoryId", historyId);
-                        command.Parameters.AddWithValue("@FileName", fileName);
-                        command.Parameters.AddWithValue("@FilePath", filePath);
-                        command.Parameters.AddWithValue("@FileSize", fileSize);
-                        await command.ExecuteNonQueryAsync();
-                    }
-                }
+                    history_id = historyId,
+                    name = fileName,
+                    path = filePath,
+                    size = fileSize
+                };
+
+                await SendRequestAsync<dynamic>("output_files", HttpMethod.Post, outputFile);
             }
             catch (Exception ex)
             {
@@ -506,118 +265,82 @@ namespace DataWizard.UI.Services
         {
             try
             {
-                using (var connection = new SqlConnection(_connectionString))
+                var fileTypes = await SendRequestAsync<List<dynamic>>(
+                    $"file_types?name=eq.{typeName}&select=id",
+                    HttpMethod.Get);
+
+                if (fileTypes != null && fileTypes.Count > 0)
                 {
-                    await connection.OpenAsync();
-                    using (var command = new SqlCommand(
-                        "SELECT FileTypeID FROM FileType WHERE TypeName = @TypeName",
-                        connection))
-                    {
-                        command.Parameters.AddWithValue("@TypeName", typeName);
-                        var result = await command.ExecuteScalarAsync();
-
-                        if (result != null)
-                        {
-                            return (int)result;
-                        }
-
-                        // Default ke 'OTHER' jika tipe tidak ditemukan
-                        return await GetFileTypeId("OTHER");
-                    }
+                    return fileTypes[0].id;
                 }
+
+                // Default to 'OTHER' if type not found
+                return await GetFileTypeId("OTHER");
             }
             catch
             {
-                // Default ke 'OTHER' pada error
                 return await GetFileTypeId("OTHER");
             }
         }
-
 
         public async Task<int> GetOutputFormatId(string formatName)
         {
             try
             {
-                using (var connection = new SqlConnection(_connectionString))
+                var formats = await SendRequestAsync<List<dynamic>>(
+                    $"output_formats?name=eq.{formatName}&select=id",
+                    HttpMethod.Get);
+
+                if (formats != null && formats.Count > 0)
                 {
-                    await connection.OpenAsync();
-                    using (var command = new SqlCommand(
-                        "SELECT OutputFormatID FROM OutputFormat WHERE FormatName = @FormatName",
-                        connection))
-                    {
-                        command.Parameters.AddWithValue("@FormatName", formatName);
-                        var result = await command.ExecuteScalarAsync();
-                        return (result != null) ? (int)result : 1; // Default ke Excel (ID=1)
-                    }
+                    return formats[0].id;
                 }
+                return 1; // Default to Excel (ID=1)
             }
             catch
             {
-                return 1; // Default ke Excel (ID=1) pada error
+                return 1;
             }
         }
+
         public async Task<List<HistoryItem>> GetRecentHistoryAsync(int userId, int count)
         {
-            var historyList = new List<HistoryItem>();
-
             try
             {
-                using (var connection = new SqlConnection(_connectionString))
+                var query = $@"history?user_id=eq.{userId}
+                    &select=id,input_file_type_id(name),output_format_id(name),
+                    process_date,processing_time,is_success,process_type
+                    &order=process_date.desc
+                    &limit={count}";
+
+                var history = await SendRequestAsync<List<dynamic>>(query, HttpMethod.Get);
+                var historyList = new List<HistoryItem>();
+
+                foreach (var item in history)
                 {
-                    await connection.OpenAsync();
-
-                    string query = @"
-                SELECT TOP (@Count) 
-                    h.HistoryID,
-                    ft.TypeName AS InputType,
-                    opf.FormatName AS OutputFormat,  -- Mengganti alias 'of' menjadi 'opf'
-                    h.ProcessDate,
-                    h.ProcessingTime,
-                    h.IsSuccess,
-                    h.ProcessType
-                FROM History h
-                JOIN [User] u ON h.UserID = u.UserID
-                JOIN FileType ft ON h.InputFileType = ft.FileTypeID
-                JOIN OutputFormat opf ON h.OutputFormatID = opf.OutputFormatID  -- Diubah disini
-                WHERE h.UserID = @UserID
-                ORDER BY h.ProcessDate DESC";
-
-                    Debug.WriteLine($"Executing query: {query}");  // Log query untuk debugging
-
-                    using (var command = new SqlCommand(query, connection))
+                    historyList.Add(new HistoryItem
                     {
-                        command.Parameters.AddWithValue("@Count", count);
-                        command.Parameters.AddWithValue("@UserID", userId);
-
-                        using (var reader = await command.ExecuteReaderAsync())
-                        {
-                            while (await reader.ReadAsync())
-                            {
-                                historyList.Add(new HistoryItem
-                                {
-                                    HistoryId = reader.GetInt32(0),
-                                    InputType = reader.GetString(1),
-                                    OutputFormat = reader.GetString(2),
-                                    ProcessDate = reader.GetDateTime(3),
-                                    ProcessingTime = reader.GetInt32(4),
-                                    IsSuccess = reader.GetBoolean(5),
-                                    ProcessType = reader.IsDBNull(6) ? "" : reader.GetString(6)
-                                });
-                            }
-                        }
-                    }
+                        HistoryId = item.id,
+                        InputType = item.input_file_type_id.name,
+                        OutputFormat = item.output_format_id.name,
+                        ProcessDate = item.process_date,
+                        ProcessingTime = item.processing_time,
+                        IsSuccess = item.is_success,
+                        ProcessType = item.process_type
+                    });
                 }
+
+                return historyList;
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"Error in GetRecentHistoryAsync: {ex.ToString()}");
-                throw;  // Re-throw exception untuk ditangani di layer atas
+                Debug.WriteLine($"Error in GetRecentHistoryAsync: {ex}");
+                throw;
             }
-
-            return historyList;
         }
     }
 
+    // Model classes remain unchanged
     public class OutputFile
     {
         public int FileId { get; set; }
@@ -635,8 +358,9 @@ namespace DataWizard.UI.Services
         public DateTime ProcessDate { get; set; }
         public int ProcessingTime { get; set; }
         public bool IsSuccess { get; set; }
-        public string ProcessType { get; set; }  // Ditambahkan
+        public string ProcessType { get; set; }
     }
+
     public class Folder
     {
         public int FolderId { get; set; }
